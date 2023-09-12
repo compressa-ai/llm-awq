@@ -86,9 +86,11 @@ class WQLinear(nn.Module):
         
         return awq_linear
 
-    @torch.no_grad()
+    # Doesn't work with qlora 
+    # @torch.no_grad()
     def forward(self, x):
         out_shape = x.shape[:-1] + (self.out_features, )
+        x = x.to(torch.float16)  # TODO: qlora wants float16, not float32, how to fix?
         out = awq_inference_engine.gemm_forward_cuda(x.reshape(-1, x.shape[-1]), self.qweight, self.scales, self.qzeros, 8)
         out = out + self.bias if self.bias is not None else out
         return out.reshape(out_shape)

@@ -1,5 +1,5 @@
 from lm_eval import evaluator, tasks
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, BitsAndBytesConfig
 import torch
 import argparse
 import os
@@ -12,8 +12,19 @@ from awq.quantize.quantizer import pseudo_quantize_model_weight, real_quantize_m
 from awq.utils.lm_eval_adaptor import LMEvalAdaptor
 from awq.utils.utils import simple_dispatch_model
 
+from peft import (
+    prepare_model_for_kbit_training,
+    LoraConfig,
+    get_peft_model,
+    PeftModel
+)
+from peft.tuners.lora import LoraLayer
+
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--qlora', type=bool, help='load qlora adapters')
+parser.add_argument('--qlora_adapters_path', type=str, help='qlora adapters path')
+parser.add_argument('--bnb', type=bool, help='load bnb model')
 parser.add_argument('--model_path', type=str, help='path of the hf model')
 parser.add_argument('--batch_size', type=int, default=1, help='batch size')
 parser.add_argument("--tasks", default=None, type=str)
@@ -68,6 +79,19 @@ print("Quantization config:", q_config)
 # build model and tokenizer
 
 def build_model_and_enc(model_path):
+    # bnb args
+    args.bf16 = False
+    args.fp16 = False
+    args.cache_dir = None
+    args.double_quant = True
+    args.quant_type = "nf4"
+    args.trust_remote_code = True
+    args.use_auth_token = False
+    args.max_memory_MB = 80000
+
+    max_memory = [v.split(':') for v in (args.max_memory or [])]
+    max_memory = {(int(k) if k.isdigit() else k):v for k,v in max_memory}
+
     if not os.path.exists(model_path):  # look into ssd
         raise FileNotFoundError(f"{model_path} not found!")
     print(f"* Building model {model_path}")
@@ -104,10 +128,66 @@ def build_model_and_enc(model_path):
             device_map=device_map,
             offload_state_dict=True,
         )
+
+        if args.qlora:
+            print("Loading adapters from checkpoint.")
+            model = PeftModel.from_pretrained(model, os.path.join(args.qlora_adapters_path, 'adapter_model'), is_trainable=True) 
+
+            for name, module in model.named_modules():  # Different from original qlora
+                if isinstance(module, LoraLayer):
+                    module = module.to(torch.float16)
+
         # Dispatch model
         model = simple_dispatch_model(model, device_map=device_map)
 
         model.eval()
+    elif args.bnb:
+        print(f'loading base model {model_path}...')
+        compute_dtype = (torch.float16 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
+
+        if torch.cuda.is_available():
+            n_gpus = torch.cuda.device_count()
+            
+        max_memory = f'{args.max_memory_MB}MB'
+        max_memory = {i: max_memory for i in range(n_gpus)}
+        device_map = "auto"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            cache_dir=args.cache_dir,
+            load_in_4bit=args.w_bit == 4,
+            load_in_8bit=args.w_bit == 8,
+            device_map=device_map,
+            max_memory=max_memory,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=args.w_bit == 4,
+                load_in_8bit=args.w_bit == 8,
+                llm_int8_threshold=6.0,
+                llm_int8_has_fp16_weight=False,
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=args.double_quant,
+                bnb_4bit_quant_type=args.quant_type,
+            ),
+            torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
+            trust_remote_code=args.trust_remote_code,
+            use_auth_token=args.use_auth_token
+        )
+
+        if args.qlora:
+            print("Loading adapters from checkpoint.")
+            model = PeftModel.from_pretrained(model, os.path.join(args.qlora_adapters_path, 'adapter_model'), is_trainable=True) 
+
+            for name, module in model.named_modules():
+                if isinstance(module, LoraLayer):
+                    if args.bf16:
+                        module = module.to(torch.bfloat16)
+                if 'norm' in name:
+                    module = module.to(torch.float32)
+                if 'lm_head' in name or 'embed_tokens' in name:
+                    if hasattr(module, 'weight'):
+                        if args.bf16 and module.weight.dtype == torch.float32:
+                            module = module.to(torch.bfloat16)
+
     else:  # fp16 to quantized
         args.run_awq &= not args.load_awq  # if load_awq, no need to run awq
         # Init model on CPU:
@@ -162,6 +242,14 @@ def build_model_and_enc(model_path):
             else:
                 raise NotImplementedError
             
+        if args.qlora:
+            print("Loading adapters from checkpoint.")
+            model = PeftModel.from_pretrained(model, os.path.join(args.qlora_adapters_path, 'adapter_model'), is_trainable=True) 
+
+            for name, module in model.named_modules():  # Different from original qlora
+                if isinstance(module, LoraLayer):
+                    module = module.to(torch.float16)
+
         # Move the model to GPU (as much as possible) for LM evaluation
         kwargs = {"max_memory": get_balanced_memory(model, max_memory if len(max_memory) > 0 else None)}
         device_map = infer_auto_device_map(
