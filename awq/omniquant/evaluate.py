@@ -6,22 +6,23 @@ from lm_eval import evaluator
 from tqdm import tqdm
 from pprint import pprint
 
-from datautils import get_loaders
-from categories import subcategories, categories
+from .datautils import get_loaders
+from .categories import subcategories, categories
 
 
 @torch.no_grad()
 def evaluate(lm, args, logger):
     results = {}
-    if "opt" in args.net.lower():
-        lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
-    elif "llama" in args.net.lower():
-        lm.model = lm.model.to(lm.device)
-    elif "falcon" in args.net.lower():
-        lm.model.transformer = lm.model.transformer.to(lm.device)
+    if not args.bnb:
+        if "opt" in args.net.lower():
+            lm.model.model.decoder = lm.model.model.decoder.to(lm.device)
+        elif "llama" in args.net.lower():
+            lm.model = lm.model.to(lm.device)
+        elif "falcon" in args.net.lower():
+            lm.model.transformer = lm.model.transformer.to(lm.device)
 
     if args.eval_ppl:
-        for dataset in ["wikitext2", "ptb", "c4","ptb-new",'c4-new']:
+        for dataset in ["wikitext2"]:  # , "ptb", "c4","ptb-new",'c4-new']:
             cache_testloader = f'{args.cache_dir}/testloader_{args.model_family}_{dataset}_all.cache'
             if os.path.exists(cache_testloader):
                 testloader = torch.load(cache_testloader)
@@ -72,11 +73,12 @@ def evaluate(lm, args, logger):
             logger.info(f'{dataset} : {ppl.item()}')
             lm.model.config.use_cache = use_cache
             results[dataset] = ppl.item()
-    if args.tasks != "":
+    if len(args.tasks) != 0 and args.tasks[0] != "":
         t_results = evaluator.simple_evaluate(
             lm,
             tasks=args.tasks,
             num_fewshot=args.num_fewshot,
+            no_cache=True,
             limit=None if args.limit == -1 else args.limit,
         )
         results.update(t_results)

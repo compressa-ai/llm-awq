@@ -9,6 +9,7 @@ from abc import abstractmethod
 from torch import nn
 import transformers
 import torch.nn.functional as F
+from lm_eval.base import LM
 
 class TruncateFunction(torch.autograd.Function):
     @staticmethod
@@ -55,7 +56,7 @@ class CacheHook:
         self.dbdict[hsh] = res
 
 
-class LM(abc.ABC):
+class LM_(abc.ABC):
     def __init__(self):
         self.cache_hook = CacheHook(None)
 

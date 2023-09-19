@@ -10,20 +10,21 @@ import pdb
 
 
 class LMClass(BaseLM):
-    def __init__(self, model, args):
+    def __init__(self, model_name, model, tokenizer, batch_size):  # , args):
 
         super().__init__()
 
-        self.args = args
+        # self.args = args
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model_name = args.model
-        self.batch_size_per_gpu = args.batch_size
+        self.model_name = model_name
+        self.batch_size_per_gpu = batch_size
+        self._batch_size = batch_size
 
-        self.model_config = args.model
-        config = AutoConfig.from_pretrained(args.model)
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False,legacy=False)
+        # self.model_config = args.model
+        # config = AutoConfig.from_pretrained(args.model)
+        self.tokenizer = tokenizer  # AutoTokenizer.from_pretrained(args.model, use_fast=False,legacy=False)
         # self.model = AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=config.torch_dtype)
-        self.model = AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=torch.float16)
+        self.model = model  # AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=torch.float16)
         self.seqlen = self.model.config.max_position_embeddings
         self.model.eval()
         self.vocab_size = self.tokenizer.vocab_size

@@ -1,3 +1,4 @@
+from pathlib import Path
 from lm_eval import evaluator, tasks
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, BitsAndBytesConfig
 import torch
@@ -6,6 +7,9 @@ import os
 import json
 from accelerate import init_empty_weights, infer_auto_device_map, dispatch_model, load_checkpoint_in_model
 from accelerate.utils.modeling import get_balanced_memory
+from awq.omniquant.LMClass import LMClass
+from awq.omniquant.evaluate import evaluate
+from awq.omniquant.utils import create_logger
 from awq.utils.parallel import auto_parallel
 from awq.quantize.pre_quant import run_awq, apply_awq
 from awq.quantize.quantizer import pseudo_quantize_model_weight, real_quantize_model_weight
@@ -20,6 +24,7 @@ from peft import (
 )
 from peft.tuners.lora import LoraLayer
 
+# import lm_eval
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--qlora', type=bool, help='load qlora adapters')
@@ -30,6 +35,7 @@ parser.add_argument('--batch_size', type=int, default=1, help='batch size')
 parser.add_argument("--tasks", default=None, type=str)
 parser.add_argument("--output_path", default=None, type=str)
 parser.add_argument('--num_fewshot', type=int, default=0)
+parser.add_argument('--omni_eval', type=bool, default=False)
 # model config
 parser.add_argument('--parallel', action='store_true',
                     help="enable model parallelism")
@@ -277,7 +283,32 @@ def main():
     # a hack here to auto set model group
     model, enc = build_model_and_enc(args.model_path)
 
-    if args.tasks is not None:
+    if args.omni_eval:
+        args.net = args.model_path.split("/")[-1]
+        args.model_family = "llama" 
+        args.eval_ppl = True
+        args.limit = -1
+        args.cache_dir = "./cache"
+        args.seed = 42
+        args.model = args.model_path
+        args.tasks = args.tasks.split(",")
+
+        output_dir = os.path.join(args.output_path, "omni_eval")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
+        output_dir = Path(output_dir)
+
+        lm = LMClass(args.model_path, model, enc, args.batch_size)
+
+        logger = create_logger(output_dir)
+        logger.info(args)
+        results = evaluate(lm, args, logger)
+
+        ppl = results["wikitext2"]
+        with open(os.path.join(args.output_path, "omni_eval", "eval.csv"), "+a") as f:
+            f.write(f"{args.net},{ppl}\n")
+
+    elif args.tasks is not None:
         task_names = args.tasks.split(",")
 
         lm_eval_model = LMEvalAdaptor(args.model_path, model, enc, args.batch_size)
