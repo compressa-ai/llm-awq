@@ -25,6 +25,258 @@ __pack_half2(const half x, const half y) {
   return (v1 << 16) | v0;
 }
 
+
+// __global__ void __launch_bounds__(64) dequantize_weights2(int G, int split_k_iters,
+//                                                          half* __restrict__ A,
+//                                                          int* __restrict__ B,
+//                                                          half* __restrict__ scaling_factors,
+//                                                          int* __restrict__ zeros,
+//                                                          int M, int IC, int OC,
+//                                                          half* __restrict__ C)
+// {
+//   static constexpr uint32_t ZERO = 0x0;
+//   float C_warp[32];
+//   __shared__ half A_shared[16 * (32 + 8)];
+//   __shared__ half B_shared[32 * (128 + 8)];
+  
+//   __shared__ half scaling_factors_shared[128];
+//   __shared__ half zeros_shared[128];
+
+//   int j_factors1 = ((OC + 128 - 1) / 128);  // 4
+//   int blockIdx_x = 0;
+//   int blockIdx_y = blockIdx.x % ((M + 16 - 1) / 16 * j_factors1);
+//   int blockIdx_z = blockIdx.x / ((M + 16 - 1) / 16 * j_factors1);
+
+//   half A_shared_warp[8];
+//   half B_shared_warp[32];
+//   for (int j_0_4_init = 0; j_0_4_init < 4; ++j_0_4_init) {
+//     for (int i = 0; i < 8; ++i) {
+//       C_warp[(j_0_4_init * 8) + i] = 0.0;
+//     }
+//   }
+
+//   static constexpr int row_stride_warp = 32 * 8 / 32;  // 8
+//   static constexpr int row_stride2 = 2 * 32 * 8 / 128;  // 4
+//   bool ld_zero_flag2 = (threadIdx.y * 32 + threadIdx.x) * 8 < 128;
+//   // TODO: Haotian: blockIdx_y / j_factors1 in A loading to support bsz > 16
+//   bool ld_A_flag2 = (blockIdx_y / j_factors1 * 16 + threadIdx.y * row_stride_warp + threadIdx.x * 8 / 32) < M;     // threadIdx.y is warp_id
+//   // bool wb_C_flag = (threadIdx.x / 4) < M;
+//   half* A_ptr2 = A + (((int)blockIdx_y) / j_factors1 * 16 + (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) * IC + (((int)threadIdx.x) % (32 / 8)) * 8;
+//   // int* B_ptr2 = B + ((int)threadIdx.y) * (OC / 8) * 2 + (((int)threadIdx.x) / (128 / 8)) * (OC / 8) + (((int)blockIdx_y) % j_factors1) * (128 / 8) + (((int)threadIdx.x) % (128 / 8)) * 1;
+
+//   int* B_ptr2 = B
+//             + ((int)threadIdx.y) * (OC / 8) * 2  // ( *64 *2 )
+//             + (((int)threadIdx.x) / (128 / 8)) * (OC / 8)  // ( /16 *64 )
+//             + (((int)blockIdx_y) % j_factors1) * (128 / 8)  // ( %4 *16 )
+//             + (((int)threadIdx.x) % (128 / 8)) * 1;  // %16
+
+//   half* A_shared_ptr2 = A_shared + ((int)threadIdx.y) * row_stride_warp * (32 + 8) + (((int)threadIdx.x) / (32 / 8)) * (32 + 8) + (((int)threadIdx.x) % (32 / 8) ) * 8;
+//   // half* B_shared_ptr2 = B_shared + ((int)threadIdx.y) * (row_stride2 / 2) * (128 + 8) + (((int)threadIdx.x) / (128 / 8)) * (128 + 8) + (((int)threadIdx.x) % (128 / 8)) * 8;
+
+//   half* B_shared_ptr2 = B_shared
+//                     + ((int)threadIdx.y) * (row_stride2 / 2) * (128 + 8)  // ( *2 *136 )
+//                     + (((int)threadIdx.x) / (128 / 8)) * (128 + 8)  // ( /16 *136 )
+//                     + (((int)threadIdx.x) % (128 / 8)) * 8;  // ( %16 *8 )
+
+//   int* zeros_ptr2 = zeros 
+//                     + (((int)blockIdx_y) % j_factors1) * (128 / 8)  // ( %4 *16 )
+//                     + ((int)threadIdx.x) % (128 / 8);  // % 16
+//   half* scaling_factors_ptr2 = scaling_factors
+//                     + (((int)blockIdx_y) % j_factors1) * (128)  // ( %4 *128 )
+//                     + (((int)threadIdx.x) % (128 / 8)) * 8;  // ( %16 *8 )
+
+//   // half* C_ptr2 = C + ((int)threadIdx.y) * (row_stride2 / 2) * (128 + 8) + (((int)threadIdx.x) / (128 / 8)) * (128 + 8) + (((int)threadIdx.x) % (128 / 8)) * 8;
+//   half* C_ptr2 = C + ((int)threadIdx.y) * (row_stride2 / 2) * (128 + 8)
+//                    + (((int)threadIdx.x) / (128 / 8)) * (128 + 8)
+//                    + (((int)threadIdx.x) % (128 / 8)) * 8;
+
+//   // preload s.f. and zeros
+//   int k_bound2 = (IC / 32 + split_k_iters - 1) / split_k_iters;  // 128
+//   if ((k_bound2 - 1) * split_k_iters * 32 + blockIdx_z * 32 >= IC) {
+//     k_bound2 -= 1;
+//   }
+//   for (int _k_0_0 = 0; _k_0_0 < k_bound2; ++_k_0_0) {
+//     int k_0_0 = _k_0_0 * split_k_iters + blockIdx_z;  // _k_0_0 + 4
+//     __syncthreads();
+//     // TODO: Haotian: blockIdx_y / j_factors1 in A loading to support bsz > 16
+//     if (ld_A_flag2) {
+//       *(uint4*)(A_shared_ptr2) = *(uint4*)(A_ptr2 + (k_0_0 * 32));
+//     } else {
+//       *(uint4*)(A_shared_ptr2) = make_uint4(0, 0, 0, 0);
+//     }
+
+//     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr2 + k_0_0 * 32 / G * (OC / 8));
+//     uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
+//     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr2 + k_0_0 * 32 / G * (OC));
+//     // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
+//     int* B_ptr_local = B_ptr2 + k_0_0 * 32 * (OC / 8);  // B_ptr2 + k_0_0 *32*16 (*512)
+
+//     for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < 8; ++ax0_ax1_fused_0) {  // обработка 8 32-х битных слов, в каждом по 8 весов
+
+//       // B: 32 x 136 (128+8) float16
+//       // each warp: 32 x 4
+//       // each thr: read 32 bit -> convert to 8xFP16 (a UINT4) -> scale and minus zero -> WB UINT4
+//       // *(uint4*)(B_shared + ((((ax0_ax1_fused_0 * 544) + (((int)threadIdx.y) * 272)) + ((((int)threadIdx.x) >> 4) * 136)) + ((((int)threadIdx.x) & 15) * 8))) = *(uint4*)(B + ((((((k_0_0 * 163840) + (ax0_ax1_fused_0 * 20480)) + (((int)threadIdx.y) * 10240)) + ((((int)threadIdx.x) >> 4) * 5120)) + (((int)blockIdx_y) * 128)) + ((((int)threadIdx.x) & 15) * 8)));
+//       // row stride in shared memory: (NWARPS * 32 * 8 / cta_N) 
+//       uint32_t B_loaded = *(uint32_t*)(B_ptr_local + ax0_ax1_fused_0 * row_stride2 * (OC / 8));  // B_ptr_local *4*16 (*64)
+//       uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
+//       //uint4 B_loaded_zero = *(uint4*)(zeros_shared + (threadIdx.x % (cta_N / 8)) * 8);
+
+//       // uint4 B_loaded_scale = *(uint4*)(scaling_factors_shared + (threadIdx.x % (cta_N / 8)) * 8);
+//       // - zero and * scale
+//       // TODO (Haotian): can save 4 assembly instructions if sormulate as deq = q * scale - zero * scale.
+//       asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
+//       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
+//       asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
+//       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
+//       asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
+//       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
+//       asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
+//       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+
+//       // write back
+//       *(uint4*)(B_shared_ptr2 + ax0_ax1_fused_0 * row_stride2 * (128 + 8)) = B_loaded_fp16;  // B_shared_ptr2 + ax0_ax1_fused_0 *4*136 (*544)
+//       // *(uint4*)(C_ptr2 + ax0_ax1_fused_0 * row_stride2 * (128 + 8)) = B_loaded_fp16;
+//     }
+//     __syncthreads();
+//   }
+
+//   for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) {
+//     for (int ax1_0 = 0; ax1_0 < 4; ++ax1_0) {
+//       {
+//         unsigned int addr;
+//         __asm__ __volatile__(
+//           "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
+//           : "=r"(addr)
+//           : "l"((void *)((&(B_shared[(((k_0_1 * 2176) + (((int)threadIdx.y) * 64)) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * 136) + ((((int)threadIdx.x) >> 4) * 8))))
+//         );
+//         __asm__ __volatile__(
+//           "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+//           "{%0, %1, %2, %3}, [%4];\n"
+//           : "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[0]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[1]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[2]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[3])
+//           : "r"(addr)
+//         );
+//       }
+//     }
+//   }
+
+//   int idx = ((int)threadIdx.y) * (OC / 8) * 2  // ( *64 *2 )
+//             + (((int)threadIdx.x) / (128 / 8)) * (OC / 8)  // ( /16 *64 )
+//             + (((int)blockIdx_y) % j_factors1) * (128 / 8)  // ( %4 *16 )
+//             + (((int)threadIdx.x) % (128 / 8)) * 1;  // %16
+
+//   for (int i = 0; i < 2; ++i) {
+//     *(C_ptr2 + idx + i) = B_shared_warp[i];
+//   }
+
+// }
+
+
+__global__ void __launch_bounds__(64) dequantize_weights(int* __restrict__ B, // 4096x64    4096 rows    64 cols
+                                                         half* __restrict__ scaling_factors,  // 32x512   32 rows    512 cols
+                                                         int* __restrict__ zeros,  // 32x64    32 rows     64 cols
+                                                         half* __restrict__ C, // 4096x512    4096 rows    512 cols
+                                                         bool dbg)
+{
+  int j_factors1 = 4;
+  int row_stride2 = 4;
+  int split_k_iters = 1;
+  static constexpr uint32_t ZERO = 0x0;
+  half B_shared[32 * (128 + 8)];
+
+  half* B_shared_ptr2 = B_shared;
+
+  half B_shared_warp[32];
+  int OC = 512;
+
+  int N = blockDim.x * gridDim.x;  // 2
+  int col = (blockIdx.x * blockDim.x + threadIdx.x);
+  int row = blockIdx.y * blockDim.y + threadIdx.y;
+  int index1 = 8 * col + 8 * row * N;  // + i (<8)
+  half* C_ptr2 = C + index1;
+
+  int index2 = col + row * N;
+  int* B_ptr2 = B + index2;
+
+  if (dbg) {
+    printf("\n-------- x %d - y %d --------\n", col, row);
+    printf("- %d-%d - N %d index1 %d \n", col, row, N, index2);
+    printf("- %d-%d - B %d \n", col, row, *B_ptr2);
+  }
+
+  //////////////////////////////////////////////////////////////////////////////////////////
+  int index3 = col + (int)(row / 128) * N;
+  int* zeros_ptr2 = zeros + index3;
+  int index4 = 8 * col + (int)(row / 128) * N * 8;  // + i (<8)
+  half* scaling_factors_ptr2 = scaling_factors + index4;
+
+  if (dbg) {
+    printf("- %d-%d - zeros[%d] %d \n", col, row, index3, *zeros_ptr2);
+    printf("- %d-%d - N %d index4 %d \n", col, row, N, index4);
+    for (int i=0; i<8; ++i) {
+      printf("- %d-%d - scale[%d] %f \n", col, row, index4 + i, __half2float(*(scaling_factors_ptr2+i)));
+    }
+  }
+
+
+    uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr2);
+    uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
+    uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr2);
+    // // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
+    // int* B_ptr_local = B_ptr2 + k_0_0 * 32 * (OC / 8);  // B_ptr2 + k_0_0 *32*16 (*512)
+  //////////////////////////////////////////////////////////////////////////////////////////
+int j=0;
+  // for (int j = 0; j < 2; ++j) {  // обработка 8 32-х битных слов, в каждом по 8 весов
+
+      uint32_t B_loaded = *(uint32_t*)(B_ptr2 + j);
+      uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
+      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
+      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.x) : "r"(B_loaded_fp16.x), "r"(B_loaded_scale.x), "r"(ZERO));
+      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_zero.y));
+      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.y) : "r"(B_loaded_fp16.y), "r"(B_loaded_scale.y), "r"(ZERO));
+      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_zero.z));
+      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
+      asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
+      asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+
+      *(uint4*)(B_shared_ptr2 + j) = B_loaded_fp16;  // B_shared_ptr2 + ax0_ax1_fused_0 *4*136 (*544)
+
+      // printf("- %d-%d - B_loaded[%d] %lu \n", col, row, j, B_loaded);
+      // printf("- %d-%d - B_loaded_fp16[%d] %lu \n", col, row, j, B_loaded_fp16);
+  if (dbg) {
+    for (int i=0; i<8; ++i) {
+      printf("- %d-%d - B_shared_ptr2[%d] %f \n", col, row, i, __half2float(*(B_shared_ptr2 + i)) );
+    }
+  }
+    // }
+  // for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) {
+  //   for (int ax1_0 = 0; ax1_0 < 4; ++ax1_0) {
+  //     {
+  //       unsigned int addr;
+  //       __asm__ __volatile__(
+  //         "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }\n"
+  //         : "=r"(addr)
+  //         : "l"((void *)((&(B_shared[(((k_0_1 * 2176) + (((int)threadIdx.y) * 64)) + (ax1_0 * 16))])) + (((((int)threadIdx.x) & 15) * 136) + ((((int)threadIdx.x) >> 4) * 8))))
+  //       );
+  //       __asm__ __volatile__(
+  //         "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+  //         "{%0, %1, %2, %3}, [%4];\n"
+  //         : "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[0]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[1]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[2]), "=r"(((unsigned *)(B_shared_warp + (ax1_0 * 8)))[3])
+  //         : "r"(addr)
+  //       );
+  //     }
+  //   }
+  // }
+
+
+  for (int i=0; i<8; ++i) {
+    // *(C_ptr2 + i) = __float2half(1000.0 + col + row + i);
+    *(C_ptr2 + i) = B_shared[i]; // __float2half(1000.0 + __half2float());
+    // *(C_ptr2 + i) = B_shared_warp[i];
+  }
+}
+
+
 __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
 {
   static constexpr uint32_t ZERO = 0x0;
@@ -92,17 +344,16 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
 
   // preload s.f. and zeros
   int k_bound = (IC / 32 + split_k_iters - 1) / split_k_iters;
-  if ((k_bound - 1) * split_k_iters * 32 + blockIdx_z * 32 >= IC) k_bound -= 1;
+  if ((k_bound - 1) * split_k_iters * 32 + blockIdx_z * 32 >= IC) {
+    k_bound -= 1;
+  }
   for (int _k_0_0 = 0; _k_0_0 < k_bound; ++_k_0_0) {
     int k_0_0 = _k_0_0 * split_k_iters + blockIdx_z;
     __syncthreads();
     // TODO: Haotian: blockIdx_y / j_factors1 in A loading to support bsz > 16
-    if (ld_A_flag)
-    {
+    if (ld_A_flag) {
       *(uint4*)(A_shared_ptr) = *(uint4*)(A_ptr + (k_0_0 * 32));
-    }
-    else
-    {
+    } else {
       *(uint4*)(A_shared_ptr) = make_uint4(0, 0, 0, 0);
     }
 
@@ -110,11 +361,6 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
     uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr + k_0_0 * 32 / G * (OC / 8));
     uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
     uint4 B_loaded_scale = *(uint4*)(scaling_factors_ptr + k_0_0 * 32 / G * (OC));
-    /*
-    if (blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 0 && threadIdx.y == 0){
-      printf("%x %x %x %x %x %x %x %x\n", B_loaded_scale.x, B_loaded_scale.y, B_loaded_scale.z, B_loaded_scale.w, B_loaded_zero.x, B_loaded_zero.y, B_loaded_zero.z, B_loaded_zero.w);
-    }
-    */
     // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
     int* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
 
@@ -140,11 +386,6 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.z) : "r"(B_loaded_fp16.z), "r"(B_loaded_scale.z), "r"(ZERO));
       asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_zero.w));
       asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(B_loaded_fp16.w) : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
-      /*
-      if (ax0_ax1_fused_0 == 0 && blockIdx_z == 0 && blockIdx_y == 0 && k_0_0 == 0 && threadIdx.x == 17 && threadIdx.y == 0){
-        printf("[x] %X %X %X %X\n", B_loaded_fp16.x, B_loaded_fp16.y, B_loaded_fp16.z, B_loaded_fp16.w);
-      }
-      */
 
       // write back
       *(uint4*)(B_shared_ptr + ax0_ax1_fused_0 * row_stride * (128 + 8)) = B_loaded_fp16;
@@ -465,7 +706,7 @@ torch::Tensor gemm_forward_cuda(
     }
     else if (num_out_channels % 64 == 0)
     {
-	int j_factors1 = num_out_channels / 64 / 1;
+	      int j_factors1 = num_out_channels / 64 / 1;
         dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
     
         // threadIdx.x: 32
@@ -475,4 +716,120 @@ torch::Tensor gemm_forward_cuda(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     return _out_feats.sum(0);
+}
+
+
+// torch::Tensor dequantize_weights_cuda2(
+//     torch::Tensor _in_feats,
+//     torch::Tensor _kernel,
+//     torch::Tensor _scaling_factors,
+//     torch::Tensor _zeros,
+//     int split_k_iters)
+// {
+//     int num_in_feats = _in_feats.size(0);
+//     int num_in_channels = _in_feats.size(1);
+//     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+
+//     auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+//     at::Tensor _de_kernel = torch::empty({split_k_iters, _kernel.size(0), _kernel.size(1) * 8}, options);
+//     // at::Tensor _de_kernel = torch::empty({split_k_iters, _kernel.size(1)*8, _kernel.size(0)}, options);
+//     at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8}, options);
+//     int num_out_feats = _out_feats.size(-2);
+//     int num_out_channels = _out_feats.size(-1);
+
+//     auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
+//     auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
+//     auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
+//     auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+//     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+//     int group_size = num_in_channels / _scaling_factors.size(0);
+
+//     if (num_out_channels % 64 != 0)
+//         throw std::invalid_argument("OC is not multiple of cta_N = 64");
+//     if (num_out_channels % 8 != 0)
+//         throw std::invalid_argument("OC is not multiple of pack_num = 8");
+//     if (group_size % 32 != 0)
+// 	      throw std::invalid_argument("Group size should be a multiple of 32");
+//     if (num_out_channels % group_size != 0)
+//         throw std::invalid_argument("OC is not multiple of Group size");
+
+//     if (num_out_channels % 128 == 0)
+//     {
+//         int j_factors1 = num_out_channels / 128 / 1;  // 4
+//         dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);  // 4
+//         // threadIdx.x: 32
+//         // threadIdx.y: i_factors[2] * j_factors[2]
+//         dim3 threads_per_block(32, 2);
+
+//         dequantize_weights<<<num_blocks, threads_per_block>>>(
+//             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, de_kernel);
+
+//         // gemm_forward_4bit_cuda_m16n128k32<<<num_blocks, threads_per_block>>>(
+//         //     group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+//     }
+//   //   else if (num_out_channels % 64 == 0)
+//   //   {
+// 	// int j_factors1 = num_out_channels / 64 / 1;
+//   //       dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+    
+//   //       // threadIdx.x: 32
+//   //       // threadIdx.y: i_factors[2] * j_factors[2]
+//   //       dim3 threads_per_block(32, 2);
+//   //       gemm_forward_4bit_cuda_m16n64k32<<<num_blocks, threads_per_block>>>(
+//   //           group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+//   //   }
+//     return _de_kernel;
+// }
+
+torch::Tensor dequantize_weights_cuda(
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    int split_k_iters,
+    int thx,
+    int thy,
+    bool dbg)
+{
+    int in_c = _kernel.size(0);
+    int qout_c = _kernel.size(1);
+    int out_c = qout_c * 8;
+
+    int x_thread = thx;
+    int y_thread = thy;
+
+    int x_blocks = 1;
+    int y_blocks = 1;
+    if (thx==0) {
+      x_thread = qout_c;
+    }
+    if (thy==0) {
+      y_thread = in_c;
+    }
+    int dbg_ = true;
+    if (thx==0 && thy==0) {
+      dbg_ = false;
+      x_thread = 8;
+      y_thread = 8;
+      x_blocks = (int)(qout_c / 8);
+      y_blocks = (int)(in_c / 8);
+    }
+    dbg = dbg && dbg_;
+
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
+
+    auto options = torch::TensorOptions().dtype(_scaling_factors.dtype()).device(_scaling_factors.device());
+    at::Tensor _de_kernel = torch::empty({in_c, out_c}, options);  // row, col 4096x512
+    // at::Tensor _de_kernel = torch::empty({y_thread * y_blocks, x_thread * x_blocks}, options);  // row, col
+
+    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
+    auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+
+    dim3 num_blocks(x_blocks, y_blocks);
+    dim3 threads_per_block(x_thread, y_thread);  //  col, row 64x4096
+
+    dequantize_weights<<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, dbg);
+
+    return _de_kernel;
 }
