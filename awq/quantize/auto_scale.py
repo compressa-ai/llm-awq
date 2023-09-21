@@ -55,6 +55,13 @@ def scale_ln_fcs(ln, fcs, scales):
         for p in fc.parameters():
             assert torch.isnan(p).sum() == 0
 
+    for n, p in ln.named_parameters():
+        assert p.is_cuda, f'{n}, {p}, {p.device}, iter {i}'
+
+    for fc in fcs:
+        for n, p in fc.named_parameters():
+            assert p.is_cuda, f'{n}, {p}, {p.device}, iter {i}'
+
 
 @torch.no_grad()
 def scale_fc_fc(fc1, fc2, scales):
@@ -91,7 +98,10 @@ def scale_gelu_fc(gelu, fc, scales):
 @torch.no_grad()
 def auto_scale_block(module, module_kwargs,
                      w_bit, q_config,
-                     input_feat):
+                     input_feat, logger):
+    logger.info(f"Start auto_scale_block")
+    print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
+
     from .quantizer import pseudo_quantize_tensor
     # firstly, get the weight quantize function
     if w_bit is not None:
@@ -132,15 +142,22 @@ def auto_scale_block(module, module_kwargs,
         history = []
 
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
+        # org_sd = {k: v for k, v in block.state_dict().items()}
+
         for ratio in range(n_grid):
             ratio = ratio * 1 / n_grid
             scales = (x_max.pow(ratio) / w_max.pow(1-ratio)
                       ).clamp(min=1e-4).view(-1)
             scales = scales / (scales.max() * scales.min()).sqrt()
             for fc in linears2scale:
+                assert fc.weight.data.is_cuda
+
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
                 fc.weight.data = w_quantize_func(
                     fc.weight.data) / (scales.view(1, -1))
+
+                assert fc.weight.data.is_cuda
+
             out = block(x, **kwargs)
             if isinstance(out, tuple):
                 out = out[0]
@@ -160,6 +177,12 @@ def auto_scale_block(module, module_kwargs,
         best_scales = best_scales.view(-1)
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
+
+        # Clear GPU memory
+        del w_max, org_out, out, history, scales
+        gc.collect()
+        torch.cuda.empty_cache()
+
         return best_scales.detach()
 
     def _auto_get_scale(prev_op, layers, inp, module2inspect=None, kwargs={}):
@@ -203,6 +226,9 @@ def auto_scale_block(module, module_kwargs,
             inp=input_feat['fc2'],
         ))
 
+        logger.info(f"if isinstance(module, OPTDecoderLayer)")
+        print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
+
     elif isinstance(module, LlamaDecoderLayer):
         # attention input
         scales_list.append(_auto_get_scale(
@@ -233,7 +259,10 @@ def auto_scale_block(module, module_kwargs,
             layers=[module.mlp.down_proj],
             inp=input_feat['mlp.down_proj'],
         ))
-    
+
+        logger.info(f"if isinstance(module, LlamaDecoderLayer)")
+        print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
+
     elif isinstance(module, BloomBlock):
         # attention input
         scales_list.append(_auto_get_scale(
@@ -264,6 +293,10 @@ def auto_scale_block(module, module_kwargs,
             layers=[module.mlp.dense_4h_to_h],
             inp=input_feat['mlp.dense_4h_to_h'],
         ))
+
+        logger.info(f"if isinstance(module, BloomBlock)")
+        print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
+
     elif "mpt" in str(module.__class__).lower():
         # attention input
         scales_list.append(_auto_get_scale(
@@ -293,6 +326,9 @@ def auto_scale_block(module, module_kwargs,
             layers=[module.ffn.down_proj],
             inp=input_feat['ffn.down_proj'],
         ))
+
+        logger.info(f"if mpt in str(module.__class__).lower()")
+        print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
 
     elif "falcon" in str(module.__class__).lower():         
         # attn out
@@ -336,20 +372,26 @@ def auto_scale_block(module, module_kwargs,
             layers=[module.mlp.dense_4h_to_h],
             inp=input_feat['mlp.dense_4h_to_h'],
         ))
-    
+
+        logger.info(f"if falcon in str(module.__class__).lower(): ")
+        print(torch.cuda.mem_get_info()[0] / 1024 ** 3, torch.cuda.mem_get_info()[1] / 1024 ** 3)
+
     else:
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
     return scales_list
 
+
 def apply_scale(module, scales_list, input_feat_dict=None):
+    i = 0
+
     for prev_op_name, layer_names, scales in scales_list:
         prev_op = get_op_by_name(module, prev_op_name)
         layers = [get_op_by_name(module, name) for name in layer_names]
 
-        prev_op.cuda()
-        for layer in layers:
-            layer.cuda()
+        # prev_op.cuda()
+        # for layer in layers:
+        #     layer.cuda()
         scales.cuda()
         
         if isinstance(prev_op, nn.Linear):
@@ -371,7 +413,12 @@ def apply_scale(module, scales_list, input_feat_dict=None):
                 inp = input_feat_dict[layer_name]
                 inp.div_(scales.view(1, -1).to(inp.device))
 
-        prev_op.cpu()
-        for layer in layers:
-            layer.cpu()
+        # prev_op.cpu()
+        # for layer in layers:
+        #     layer.cpu()
         scales.cpu()
+
+        for n, p in module.named_parameters():
+            assert p.is_cuda, f'{n}, {p}, {p.device}, iter {i}'
+
+        i += 1
