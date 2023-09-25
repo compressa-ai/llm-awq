@@ -8,6 +8,7 @@ import json
 from accelerate import init_empty_weights, infer_auto_device_map, dispatch_model, load_checkpoint_in_model
 from accelerate.utils.modeling import get_balanced_memory
 from awq.omniquant.LMClass import LMClass
+from awq.omniquant.datautils import get_loaders
 from awq.omniquant.evaluate import evaluate
 from awq.omniquant.utils import create_logger
 from awq.utils.parallel import auto_parallel
@@ -24,6 +25,10 @@ from peft import (
 )
 from peft.tuners.lora import LoraLayer
 
+from smoothquant.calibration import get_act_scales
+from smoothquant.smooth import smooth_lm_llama
+from datasets import load_dataset
+
 # import lm_eval
 
 parser = argparse.ArgumentParser()
@@ -33,7 +38,8 @@ parser.add_argument('--bnb', type=bool, help='load bnb model')
 parser.add_argument('--model_path', type=str, help='path of the hf model')
 parser.add_argument('--batch_size', type=int, default=1, help='batch size')
 parser.add_argument("--tasks", default=None, type=str)
-parser.add_argument("--output_path", default=None, type=str)
+parser.add_argument("--tasks_str", default="", type=str)
+parser.add_argument("--output_path", default="output", type=str)
 parser.add_argument('--num_fewshot', type=int, default=0)
 parser.add_argument('--omni_eval', type=bool, default=False)
 # model config
@@ -66,6 +72,12 @@ parser.add_argument('--dump_awq', type=str, default=None,
                     help="save the awq search results")
 parser.add_argument('--load_awq', type=str, default=None,
                     help="load the awq search results")
+parser.add_argument('--smooth_quant', type=str, default=None,
+                    help="apply smooth quant")
+parser.add_argument('--smooth_quant_dataset', type=str, default="../../smooth_quant_data/wiki.txt",
+                    help="smooth quant dataset")
+parser.add_argument('--seed', type=int, default=42)
+
 args = parser.parse_args()
 
 max_memory = [v.split(':') for v in (args.max_memory or [])]
@@ -83,6 +95,33 @@ q_config = {
 print("Quantization config:", q_config)
 
 # build model and tokenizer
+
+def run_omni_eval(args, model, tokenizer, verbose=False):
+    args.net = args.model_path.split("/")[-1]
+    args.model_family = "llama" 
+    args.eval_ppl = True
+    args.limit = -1
+    args.cache_dir = "./cache"
+    args.seed = 42
+    args.model = args.model_path
+    args.tasks = args.tasks_str.split(",")
+
+    output_dir = os.path.join(args.output_path, "omni_eval")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir)
+
+    lm = LMClass(args.model_path, model, tokenizer, args.batch_size)
+
+    logger_oe = create_logger(output_dir)
+    if verbose:
+        logger_oe.info(args)
+    results = evaluate(lm, args, logger_oe)
+
+    ppl = results["wikitext2"]
+    with open(os.path.join(args.output_path, "omni_eval", "eval.csv"), "+a") as f:
+        f.write(f"{args.net},{ppl},{args.w_bit},{args.bnb}\n")
+
 
 def build_model_and_enc(model_path):
     # bnb args
@@ -203,8 +242,15 @@ def build_model_and_enc(model_path):
 
         model.eval()
 
+        if args.smooth_quant:
+            print("Apply SmoothQuant")
+            model = run_smooth_quant(args, enc, model, max_memory)
+
         if args.run_awq:
             assert args.dump_awq, "Please save the awq results with --dump_awq"
+
+            if args.omni_eval:
+                run_omni_eval(args, model, enc)
                         
             awq_results = run_awq(
                 model, enc,
@@ -266,8 +312,28 @@ def build_model_and_enc(model_path):
             **kwargs
         )
         model = dispatch_model(model, device_map=device_map)
-
     return model, enc
+
+def run_smooth_quant(args, enc, model, max_memory):
+    kwargs = {"max_memory": get_balanced_memory(model, max_memory if len(max_memory) > 0 else None)}
+    device_map = infer_auto_device_map(
+                model,
+                # TODO: can we remove this?
+                no_split_module_classes=[
+                    "OPTDecoderLayer", "LlamaDecoderLayer", "BloomBlock", "MPTBlock", "DecoderLayer"],
+                **kwargs
+            )
+    model = dispatch_model(model, device_map=device_map)
+
+    if os.path.exists(args.smooth_quant):
+        act_scales = torch.load(args.smooth_quant)
+    else:
+        dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+        act_scales = get_act_scales(model, enc, dataset, num_samples=512, seq_len=512)
+        os.makedirs(os.path.dirname(args.smooth_quant), exist_ok=True)
+        torch.save(act_scales, args.smooth_quant)
+    smooth_lm_llama(model, act_scales, 0.5)
+    return model
 
 
 def main():
@@ -284,29 +350,7 @@ def main():
     model, enc = build_model_and_enc(args.model_path)
 
     if args.omni_eval:
-        args.net = args.model_path.split("/")[-1]
-        args.model_family = "llama" 
-        args.eval_ppl = True
-        args.limit = -1
-        args.cache_dir = "./cache"
-        args.seed = 42
-        args.model = args.model_path
-        args.tasks = args.tasks.split(",")
-
-        output_dir = os.path.join(args.output_path, "omni_eval")
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
-        output_dir = Path(output_dir)
-
-        lm = LMClass(args.model_path, model, enc, args.batch_size)
-
-        logger = create_logger(output_dir)
-        logger.info(args)
-        results = evaluate(lm, args, logger)
-
-        ppl = results["wikitext2"]
-        with open(os.path.join(args.output_path, "omni_eval", "eval.csv"), "+a") as f:
-            f.write(f"{args.net},{ppl}\n")
+        run_omni_eval(args, model, enc)
 
     elif args.tasks is not None:
         task_names = args.tasks.split(",")
