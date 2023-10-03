@@ -14,6 +14,8 @@ from .auto_clip import auto_clip_block, apply_clip
 
 __all__ = ["run_awq"]
 
+_FREEZE_FRACTION = 1.0
+
 
 def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
@@ -173,3 +175,183 @@ def run_awq(
 def apply_awq(model, awq_results):
     apply_scale(model, awq_results["scale"])
     apply_clip(model, awq_results["clip"])
+
+
+
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
+from ..utils.module import get_op_by_name, get_op_name, set_op_by_name
+
+
+@torch.no_grad()
+def freeze_fc_fc(fc1, fc2, fc1_orig, fc2_orig, scales, freeze_frac):
+    assert fc1.__class__.__name__.endswith('Linear')
+    assert fc2.__class__.__name__.endswith('Linear')
+    # assert isinstance(fc1, nn.Linear), type(fc1)
+    # assert isinstance(fc2, nn.Linear), type(fc2)
+    # assert fc1.out_features == fc2.in_features
+
+    scales = scales.to(fc1.weight.device)
+
+    # fc1.weight.div_(scales.view(-1, 1))
+    """
+    fc1.weight[-scales.size(0):].div_(scales.view(-1, 1))
+    if fc1.bias is not None:
+        fc1.bias.div_(scales.view(-1))
+
+    fc2.weight.mul_(scales.view(1, -1))
+    """
+    p = freeze_frac
+
+    inds = torch.argsort(scales)
+    num_inds_to_restore = int(len(scales) * p)
+    num_inds_to_skip = len(scales) - num_inds_to_restore
+    inds_to_restore = inds[num_inds_to_skip:]
+    inds_to_skip = inds[:num_inds_to_skip]
+
+    assert len(inds_to_skip) + len(inds_to_restore) == len(scales)
+    assert torch.argmax(scales) in inds_to_restore
+
+    print(f'!!! Num inds: {len(inds)}. Num inds to restore: {num_inds_to_restore}.')
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    scales[inds_to_restore] = 1.0
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    scales[inds_to_skip] = 0.0
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    # print()
+
+    assert torch.sum(scales) == num_inds_to_restore, f'{sum(scales)} {num_inds_to_restore} {len(inds_to_restore)} {len(scales)}'
+
+
+    fc1.weight[-scales.size(0):] = (
+        fc1.weight[-scales.size(0):] * (1 - scales.view(-1, 1))
+        + fc1_orig.weight[-scales.size(0):] * scales.view(-1, 1)
+    )
+    if fc1.bias is not None:
+        fc1.bias = (
+            fc1.bias * (1 - scales.view(-1))
+            + fc1_orig.bias * scales.view(-1)
+        )
+
+    fc2.weight.data = (
+        fc2.weight.data * (1 - scales.view(1, -1))
+        + fc2_orig.weight.data * scales.view(1, -1)
+    )
+
+
+    for p in fc1.parameters():
+        assert torch.isnan(p).sum() == 0
+    for p in fc2.parameters():
+        assert torch.isnan(p).sum() == 0
+
+
+@torch.no_grad()
+def freeze_ln_fcs(ln, fcs, ln_orig, fcs_orig, scales, freeze_frac):
+    if not isinstance(fcs, list):
+        fcs = [fcs]
+
+    scales = scales.to(ln.weight.device)
+
+    # debugging start even scales = 1 does not work?
+    """
+    scales = scales * 0
+    scales = scales + 1
+    """
+    # debugging end
+
+    """
+    ln.weight.div_(scales)
+    if hasattr(ln, 'bias') and ln.bias is not None:
+        ln.bias.div_(scales)
+
+    for fc in fcs:
+        fc.weight.mul_(scales.view(1, -1))
+    """
+    p = freeze_frac
+
+    inds = torch.argsort(scales)
+    num_inds_to_restore = int(len(scales) * p)
+    num_inds_to_skip = len(scales) - num_inds_to_restore
+    inds_to_restore = inds[num_inds_to_skip:]
+    inds_to_skip = inds[:num_inds_to_skip]
+
+    assert len(inds_to_skip) + len(inds_to_restore) == len(scales)
+    assert torch.argmax(scales) in inds_to_restore
+
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    scales[inds_to_restore] = 1.0
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    scales[inds_to_skip] = 0.0
+    # print(f'!!! {torch.sum(scales)} {scales[:20]}')
+    # print()
+
+    assert torch.sum(scales) == num_inds_to_restore, f'{sum(scales)} {num_inds_to_restore} {len(inds_to_restore)} {len(scales)}'
+
+
+    ln.weight.data = (
+        ln.weight.data * (1 - scales)
+        + ln_orig.weight.data * scales
+    )
+
+    if hasattr(ln, 'bias') and ln.bias is not None:
+        ln.bias = (
+            ln.bias * (1 - scales)
+            + ln_orig.bias.data * scales
+        )
+
+    for fc, fc_orig in zip(fcs, fcs_orig):
+        fc.weight.data = (
+            fc.weight.data * (1 - scales)
+            + fc_orig.weight.data * scales
+        )
+
+
+    for p in ln.parameters():
+        assert torch.isnan(p).sum() == 0
+    for fc in fcs:
+        for p in fc.parameters():
+            assert torch.isnan(p).sum() == 0
+
+    # for n, p in ln.named_parameters():
+    #     assert p.is_cuda, f'{n}, {p}, {p.device}'
+    #
+    # for fc in fcs:
+    #     for n, p in fc.named_parameters():
+    #         assert p.is_cuda, f'{n}, {p}, {p.device}'
+
+
+def freeze_awq(module, orig_module, awq_results, freeze_frac):
+    scales_list = awq_results['scale']
+
+    i = 0
+
+    for prev_op_name, layer_names, scales in scales_list:
+        prev_op = get_op_by_name(module, prev_op_name)
+        prev_op_orig = get_op_by_name(orig_module, prev_op_name)
+
+        layers = [get_op_by_name(module, name) for name in layer_names]
+        layers_orig = [get_op_by_name(orig_module, name) for name in layer_names]
+
+        # prev_op.cuda()
+        # for layer in layers:
+        #     layer.cuda()
+        scales.cuda()
+
+        if prev_op.__class__.__name__.endswith('Linear'):  #isinstance(prev_op, nn.Linear):
+            assert len(layers) == 1
+            freeze_fc_fc(prev_op, layers[0], prev_op_orig, layers_orig[0], scales, freeze_frac)
+        elif prev_op.__class__.__name__.endswith('LayerNorm') or prev_op.__class__.__name__.endswith('LlamaRMSNorm'):  #isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm)):
+            freeze_ln_fcs(prev_op, layers, prev_op_orig, layers_orig, scales, freeze_frac)
+        else:
+            raise NotImplementedError(
+                f"prev_op {type(prev_op)} not supported yet!")
+
+        # prev_op.cpu()
+        # for layer in layers:
+        #     layer.cpu()
+        scales.cpu()
+
+        # for n, p in module.named_parameters():
+        #     assert p.is_cuda, f'{n}, {p}, {p.device}, iter {i}'
+
+        i += 1
+
