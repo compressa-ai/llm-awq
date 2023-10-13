@@ -25,7 +25,10 @@ class LMClass(BaseLM):
         self.tokenizer = tokenizer  # AutoTokenizer.from_pretrained(args.model, use_fast=False,legacy=False)
         # self.model = AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=config.torch_dtype)
         self.model = model  # AutoModelForCausalLM.from_pretrained(args.model, config=config, device_map='cpu',torch_dtype=torch.float16)
-        self.seqlen = self.model.config.max_position_embeddings
+        if hasattr(self.model.config, "max_position_embeddings"):
+            self.seqlen = self.model.config.max_position_embeddings
+        else:
+            self.seqlen = None
         self.model.eval()
         self.vocab_size = self.tokenizer.vocab_size
         print("vocab size: ", self.vocab_size)
