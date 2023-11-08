@@ -7,10 +7,12 @@ import os
 import json
 from accelerate import init_empty_weights, infer_auto_device_map, dispatch_model, load_checkpoint_in_model
 from accelerate.utils.modeling import get_balanced_memory
-from awq.omniquant.LMClass import LMClass
-from awq.omniquant.datautils import get_loaders
-from awq.omniquant.evaluate import evaluate
-from awq.omniquant.utils import create_logger
+
+from lib.omniquant.LMClass import LMClass
+from lib.omniquant.datautils import get_loaders
+from lib.omniquant.evaluate import evaluate
+from lib.omniquant.utils import create_logger
+
 from awq.utils.parallel import auto_parallel
 from awq.quantize.pre_quant import run_awq, apply_awq
 from awq.quantize.quantizer import pseudo_quantize_model_weight, real_quantize_model_weight
